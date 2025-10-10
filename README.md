@@ -10,13 +10,41 @@ This repository contains the official authors implementation associated with the
 
 <section class="section" id="BibTeX">
   <div class="container is-max-desktop content">
-    <h2 class="title">BibTeX</h2>
-    <pre><code>@article{qin2023langsplat,
-  title={LangSplat: 3D Language Gaussian Splatting},
+    <h2 class="title">😊LangSplat Family</h2>
+    <pre><code>@inproceedings{qin2024langsplat,
+  title={Langsplat: 3d language gaussian splatting},
   author={Qin, Minghan and Li, Wanhua and Zhou, Jiawei and Wang, Haoqian and Pfister, Hanspeter},
-  journal={arXiv preprint arXiv:2312.16084},
-  year={2023}
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={20051--20060},
+  year={2024}
 }</code></pre>
+
+  <p><strong>🎉 We have released LangSplat V2!</strong>  
+  The new version significantly improves performance, achieving over <strong>450+ FPS</strong> in rendering.  <a href="https://langsplat-v2.github.io/" target="_blank" style="text-decoration: underline;">[NeurIPS 2025] LangSplat V2</a>
+  </p>
+
+  <pre><code>@article{li2025langsplatv2,
+  title={LangSplatV2: High-dimensional 3D Language Gaussian Splatting with 450+ FPS},
+  author={Li, Wanhua and Zhao, Yujie and Qin, Minghan and Liu, Yang and Cai, Yuanhao and Gan, Chuang and Pfister, Hanspeter},
+  journal={arXiv preprint arXiv:2507.07136},
+  year={2025}
+}</code></pre>
+
+  <p>🎉We also invite everyone to check out our <a href="https://4d-langsplat.github.io/" target="_blank" style="text-decoration: underline;">[CVPR 2025] 4D LangSplat</a>, which is a multimodal, object-wise video prompting approach combined with a status deformable network to learn 4D language fields.
+  </p> 
+
+  <pre><code>@inproceedings{li20254d,
+  title={4d langsplat: 4d language gaussian splatting via multimodal large language models},
+  author={Li, Wanhua and Zhou, Renping and Zhou, Jiawei and Song, Yingwei and Herter, Johannes and Qin, Minghan and Huang, Gao and Pfister, Hanspeter},
+  booktitle={Proceedings of the Computer Vision and Pattern Recognition Conference},
+  pages={22001--22011},
+  year={2025}
+}</code></pre>
+  
+  </div> 
+</section>
+
+  
   </div>
 </section>
 
