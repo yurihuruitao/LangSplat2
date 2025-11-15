@@ -10,3 +10,8 @@ tensorboard_3d
 events.out*
 ckpt
 release
+model
+datasets
+ckpts
+3DGS
+eval_result

@@ -1,8 +1,9 @@
 #!/bin/bash
-CASE_NAME="teatime"
+# filepath: /home/ubuntu/langsplat/LangSplat/eval/eval.sh
+CASE_NAME="ramen"
 
 # path to lerf_ovs/label
-gt_folder="../data/lerf_ovs/label"
+gt_folder="../datasets/lerf_ovs/label"
 
 root_path="../"
 

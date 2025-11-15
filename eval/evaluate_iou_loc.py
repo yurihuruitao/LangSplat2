@@ -231,10 +231,21 @@ def evaluate(feat_dir, output_path, ae_ckpt_path, json_folder, mask_thresh, enco
     eval_index_list = [int(idx) for idx in list(gt_ann.keys())]
     compressed_sem_feats = np.zeros((len(feat_dir), len(eval_index_list), *image_shape, 3), dtype=np.float32)
     for i in range(len(feat_dir)):
-        feat_paths_lvl = sorted(glob.glob(os.path.join(feat_dir[i], '*.npy')),
-                               key=lambda file_name: int(os.path.basename(file_name).split(".npy")[0]))
+        feat_paths_lvl = sorted(
+            glob.glob(os.path.join(feat_dir[i], '*.npy')),
+            key=lambda file_name: int(os.path.basename(file_name).split(".npy")[0])
+        )
         for j, idx in enumerate(eval_index_list):
-            compressed_sem_feats[i][j] = np.load(feat_paths_lvl[idx])
+            # 原代码:
+            # compressed_sem_feats[i][j] = np.load(feat_paths_lvl[idx])
+
+            # 修正：按排序后的第 j 个文件取特征
+            if j >= len(feat_paths_lvl):
+                raise IndexError(
+                    f"Not enough feature files in {feat_dir[i]}: "
+                    f"need index {j}, but only {len(feat_paths_lvl)} files found."
+                )
+            compressed_sem_feats[i][j] = np.load(feat_paths_lvl[j])
 
     # instantiate autoencoder and openclip
     clip_model = OpenCLIPNetwork(device)
@@ -324,9 +335,9 @@ if __name__ == "__main__":
     # NOTE config setting
     dataset_name = args.dataset_name
     mask_thresh = args.mask_thresh
-    feat_dir = [os.path.join(args.feat_dir, dataset_name+f"_{i}", "train/ours_None/renders_npy") for i in range(1,4)]
+    feat_dir = [os.path.join(args.feat_dir, dataset_name+"_3", "train/ours_30000/renders_npy") for i in range(1,4)]
     output_path = os.path.join(args.output_dir, dataset_name)
-    ae_ckpt_path = os.path.join(args.ae_ckpt_dir, dataset_name, "ae_ckpt/best_ckpt.pth")
+    ae_ckpt_path = os.path.join(args.ae_ckpt_dir, dataset_name, "best_ckpt.pth")
     json_folder = os.path.join(args.json_folder, dataset_name)
 
     # NOTE logger

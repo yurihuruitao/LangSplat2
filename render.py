@@ -56,17 +56,20 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, shuffle=False)
         checkpoint = os.path.join(args.model_path, 'chkpnt30000.pth')
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint,weights_only=False)
         gaussians.restore(model_params, args, mode='test')
         
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+        # 使用 checkpoint 中的迭代次数，如果没有则使用 30000
+        render_iteration = scene.loaded_iter if scene.loaded_iter is not None else 30000
+
         if not skip_train:
-             render_set(dataset.model_path, dataset.source_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, args)
+             render_set(dataset.model_path, dataset.source_path, "train", render_iteration, scene.getTrainCameras(), gaussians, pipeline, background, args)
 
         if not skip_test:
-             render_set(dataset.model_path, dataset.source_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, args)
+             render_set(dataset.model_path, dataset.source_path, "test", render_iteration, scene.getTestCameras(), gaussians, pipeline, background, args)
 
 if __name__ == "__main__":
     # Set up command line argument parser
