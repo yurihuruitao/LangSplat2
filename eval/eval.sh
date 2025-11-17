@@ -1,6 +1,6 @@
 #!/bin/bash
 # filepath: /home/ubuntu/langsplat/LangSplat/eval/eval.sh
-CASE_NAME="ramen"
+CASE_NAME="ramen_try"
 
 # path to lerf_ovs/label
 gt_folder="../datasets/lerf_ovs/label"

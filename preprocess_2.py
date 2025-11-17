@@ -178,14 +178,19 @@ def _embed_clip_sam_tiles(image, sam_encoder):
     seg_images, seg_map = sam_encoder(aug_imgs)
 
     clip_embeds = {}
+    # 固定四个尺度，缺失的用 None 占位
     for mode in ['default', 's', 'm', 'l']:
-        tiles = seg_images[mode]
+        tiles = seg_images.get(mode, None)
+        if tiles is None:
+            clip_embeds[mode] = None
+            continue
         tiles = tiles.to("cuda")
         with torch.no_grad():
             clip_embed = model.encode_image(tiles)
         clip_embed /= clip_embed.norm(dim=-1, keepdim=True)
+        # 与原版 preprocess 行为一致：先在 GPU 用 fp16，加速/省显存
         clip_embeds[mode] = clip_embed.detach().cpu().half()
-    
+
     return clip_embeds, seg_map
 
 def get_seg_img(mask, image):
@@ -213,68 +218,77 @@ def filter(keep: torch.Tensor, masks_result) -> None:
     return result_keep
 
 def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs):
-    """
-    Perform mask non-maximum suppression (NMS) on a set of masks based on their scores.
-    
-    Args:
-        masks (torch.Tensor): has shape (num_masks, H, W)
-        scores (torch.Tensor): The scores of the masks, has shape (num_masks,)
-        iou_thr (float, optional): The threshold for IoU.
-        score_thr (float, optional): The threshold for the mask scores.
-        inner_thr (float, optional): The threshold for the overlap rate.
-        **kwargs: Additional keyword arguments.
-    Returns:
-        selected_idx (torch.Tensor): A tensor representing the selected indices of the masks after NMS.
-    """
+    """向量化实现的 mask NMS，去掉 Python 双重 for 循环。"""
 
+    # 按得分从高到低排序
     scores, idx = scores.sort(0, descending=True)
-    num_masks = idx.shape[0]
-    
     masks_ord = masks[idx.view(-1), :]
-    masks_area = torch.sum(masks_ord, dim=(1, 2), dtype=torch.float)
+    num_masks = masks_ord.shape[0]
 
-    iou_matrix = torch.zeros((num_masks,) * 2, dtype=torch.float, device=masks.device)
-    inner_iou_matrix = torch.zeros((num_masks,) * 2, dtype=torch.float, device=masks.device)
-    for i in range(num_masks):
-        for j in range(i, num_masks):
-            intersection = torch.sum(torch.logical_and(masks_ord[i], masks_ord[j]), dtype=torch.float)
-            union = torch.sum(torch.logical_or(masks_ord[i], masks_ord[j]), dtype=torch.float)
-            iou = intersection / union
-            iou_matrix[i, j] = iou
-            # select mask pairs that may have a severe internal relationship
-            if intersection / masks_area[i] < 0.5 and intersection / masks_area[j] >= 0.85:
-                inner_iou = 1 - (intersection / masks_area[j]) * (intersection / masks_area[i])
-                inner_iou_matrix[i, j] = inner_iou
-            if intersection / masks_area[i] >= 0.85 and intersection / masks_area[j] < 0.5:
-                inner_iou = 1 - (intersection / masks_area[j]) * (intersection / masks_area[i])
-                inner_iou_matrix[j, i] = inner_iou
+    # 展平为 (N, HW)
+    n, h, w = masks_ord.shape
+    masks_flat = masks_ord.reshape(n, -1).to(torch.float32)
 
-    iou_matrix.triu_(diagonal=1)
+    # 每个 mask 的面积
+    masks_area = masks_flat.sum(dim=1)  # (N,)
+
+    # 交集： (N,HW) @ (HW,N) -> (N,N)
+    intersection = (masks_flat @ masks_flat.t())
+
+    # 并集：area_i + area_j - intersection
+    area_i = masks_area.view(-1, 1)
+    area_j = masks_area.view(1, -1)
+    union = area_i + area_j - intersection
+    # 防止除零
+    eps = 1e-6
+    iou_matrix = intersection / (union + eps)
+
+    # 只保留上三角，避免重复计算 + 去掉对角线
+    iou_matrix = torch.triu(iou_matrix, diagonal=1)
+
+    # inner-iou 计算：需要 intersection/area_i 和 intersection/area_j
+    inter_over_i = intersection / (area_i + eps)
+    inter_over_j = intersection / (area_j + eps)
+
+    inner_iou_matrix = torch.zeros_like(iou_matrix)
+
+    # 条件1： intersection/area_i < 0.5 且 intersection/area_j >= 0.85，对应原来的 i,j
+    cond1 = (inter_over_i < 0.5) & (inter_over_j >= 0.85)
+    inner_iou_matrix[cond1] = 1 - (inter_over_j[cond1] * inter_over_i[cond1])
+
+    # 条件2：intersection/area_i >= 0.85 且 intersection/area_j < 0.5，对应原来的 j,i
+    cond2 = (inter_over_i >= 0.85) & (inter_over_j < 0.5)
+    # 这里需要写入到 (j,i)，所以转置索引
+    inner_iou_matrix = inner_iou_matrix + inner_iou_matrix.t()
+    tmp = torch.zeros_like(inner_iou_matrix)
+    tmp[cond2] = 1 - (inter_over_j[cond2] * inter_over_i[cond2])
+    inner_iou_matrix = inner_iou_matrix + tmp + tmp.t()
+
+    # 取每个 mask 与其它 mask 的最大 IoU / inner-IoU
     iou_max, _ = iou_matrix.max(dim=0)
     inner_iou_matrix_u = torch.triu(inner_iou_matrix, diagonal=1)
     inner_iou_max_u, _ = inner_iou_matrix_u.max(dim=0)
     inner_iou_matrix_l = torch.tril(inner_iou_matrix, diagonal=1)
     inner_iou_max_l, _ = inner_iou_matrix_l.max(dim=0)
-    
+
     keep = iou_max <= iou_thr
     keep_conf = scores > score_thr
     keep_inner_u = inner_iou_max_u <= 1 - inner_thr
     keep_inner_l = inner_iou_max_l <= 1 - inner_thr
-    
-    # If there are no masks with scores above threshold, the top 3 masks are selected
-    if keep_conf.sum() == 0:
-        index = scores.topk(3).indices
-        keep_conf[index, 0] = True
-    if keep_inner_u.sum() == 0:
-        index = scores.topk(3).indices
-        keep_inner_u[index, 0] = True
-    if keep_inner_l.sum() == 0:
-        index = scores.topk(3).indices
-        keep_inner_l[index, 0] = True
-    keep *= keep_conf
-    keep *= keep_inner_u
-    keep *= keep_inner_l
 
+    # 若没有任何满足条件的 mask，则保留 top-k（默认为 3）
+    topk = min(3, num_masks)
+    if keep_conf.sum() == 0:
+        index = scores.topk(topk).indices
+        keep_conf[index] = True
+    if keep_inner_u.sum() == 0:
+        index = scores.topk(topk).indices
+        keep_inner_u[index] = True
+    if keep_inner_l.sum() == 0:
+        index = scores.topk(topk).indices
+        keep_inner_l[index] = True
+
+    keep = keep & keep_conf & keep_inner_u & keep_inner_l
     selected_idx = idx[keep]
     return selected_idx
 
@@ -311,20 +325,19 @@ def sam_encoder(image):
             seg_img_list.append(pad_seg_img)
 
             seg_map[masks[i]['segmentation']] = i
+        if len(seg_img_list) == 0:
+            return None, seg_map
         seg_imgs = np.stack(seg_img_list, axis=0) # b,H,W,3
         seg_imgs = (torch.from_numpy(seg_imgs.astype("float32")).permute(0,3,1,2) / 255.0).to('cuda')
 
         return seg_imgs, seg_map
 
     seg_images, seg_maps = {}, {}
-    seg_images['default'], seg_maps['default'] = mask2segmap(masks_default, image)
-    if len(masks_s) != 0:
-        seg_images['s'], seg_maps['s'] = mask2segmap(masks_s, image)
-    if len(masks_m) != 0:
-        seg_images['m'], seg_maps['m'] = mask2segmap(masks_m, image)
-    if len(masks_l) != 0:
-        seg_images['l'], seg_maps['l'] = mask2segmap(masks_l, image)
-    
+    for name, masks in zip(['default', 's', 'm', 'l'], [masks_default, masks_s, masks_m, masks_l]):
+        seg_imgs, seg_map = mask2segmap(masks, image)
+        seg_images[name] = seg_imgs  # 可能为 None，占位
+        seg_maps[name] = seg_map
+
     # 0:default 1:s 2:m 3:l
     return seg_images, seg_maps
 
@@ -358,10 +371,12 @@ if __name__ == '__main__':
     data_list = os.listdir(img_folder)
     data_list.sort()
 
+    # 初始化 OpenCLIP 与 SAM，仅加载一次并常驻 GPU
     model = OpenCLIPNetwork(OpenCLIPNetworkConfig)
     sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt_path).to('cuda')
     mask_generator = SamAutomaticMaskGenerator(
         model=sam,
+        # 适当降低采样密度以减少 mask 数量并加速
         points_per_side=32,
         pred_iou_thresh=0.7,
         box_nms_thresh=0.7,
@@ -371,34 +386,88 @@ if __name__ == '__main__':
         min_mask_region_area=100,
     )
 
-    img_list = []
+    save_folder = os.path.join(dataset_path, 'language_features')
+    os.makedirs(save_folder, exist_ok=True)
+
     WARNED = False
-    for data_path in data_list:
+    for idx, data_path in enumerate(tqdm(data_list, desc="Embedding images", leave=False)):
         image_path = os.path.join(img_folder, data_path)
         image = cv2.imread(image_path)
+        if image is None:
+            continue
 
         orig_w, orig_h = image.shape[1], image.shape[0]
         if args.resolution == -1:
             if orig_h > 1080:
                 if not WARNED:
                     print("[ INFO ] Encountered quite large input images (>1080P), rescaling to 1080P.\n "
-                        "If this is not desired, please explicitly specify '--resolution/-r' as 1")
+                          "If this is not desired, please explicitly specify '--resolution/-r' as 1")
                     WARNED = True
                 global_down = orig_h / 1080
             else:
                 global_down = 1
         else:
             global_down = orig_w / args.resolution
-            
-        scale = float(global_down)
-        resolution = (int( orig_w  / scale), int(orig_h / scale))
-        
-        image = cv2.resize(image, resolution)
-        image = torch.from_numpy(image)
-        img_list.append(image)
-    images = [img_list[i].permute(2, 0, 1)[None, ...] for i in range(len(img_list))]
-    imgs = torch.cat(images)
 
-    save_folder = os.path.join(dataset_path, 'language_features')
-    os.makedirs(save_folder, exist_ok=True)
-    create(imgs, data_list, save_folder)
+        scale = float(global_down)
+        resolution = (int(orig_w / scale), int(orig_h / scale))
+
+        image_resized = cv2.resize(image, resolution)
+        image_tensor = torch.from_numpy(image_resized).permute(2, 0, 1)[None, ...]
+
+        # 调用 SAM + CLIP 生成当前图片的特征与分割
+        img_embed_dict, seg_map_dict = _embed_clip_sam_tiles(image_tensor, sam_encoder)
+
+        modes = ['default', 's', 'm', 'l']
+
+        # 计算每个尺度的长度（None 视为 0）
+        lengths = []
+        for m in modes:
+            feat = img_embed_dict[m]
+            lengths.append(0 if feat is None else len(feat))
+        total_length = sum(lengths)
+
+        if total_length == 0:
+            print(f"[ WARN ] No valid masks for {data_path}, skip.")
+            continue
+
+        # 拼接不同 scale 的特征到 float32
+        feats = []
+        for m in modes:
+            feat = img_embed_dict[m]
+            if feat is None:
+                continue
+            feats.append(feat.float())
+        img_embed = torch.cat(feats, dim=0)
+        assert img_embed.shape[0] == total_length
+
+        # 构造 seg_maps: [4, H, W]，保持 mode 顺序并修正 index 偏移
+        seg_map_tensor = []
+        lengths_cumsum = lengths.copy()
+        for j in range(1, len(lengths_cumsum)):
+            lengths_cumsum[j] += lengths_cumsum[j - 1]
+
+        for j, m in enumerate(modes):
+            v = seg_map_dict[m]
+            v = v.copy()
+            if lengths[j] == 0:
+                # 该尺度没有特征，保持全 -1 占位
+                seg_map_tensor.append(torch.from_numpy(v))
+                continue
+            if j == 0:
+                seg_map_tensor.append(torch.from_numpy(v))
+            else:
+                offset = lengths_cumsum[j - 1]
+                v[v != -1] += offset
+                seg_map_tensor.append(torch.from_numpy(v))
+
+        seg_maps = torch.stack(seg_map_tensor, dim=0)  # [4,H,W]
+
+        save_path = os.path.join(save_folder, data_path.split('.')[0])
+        assert total_length == int(seg_maps.max() + 1)
+
+        curr = {
+            'feature': img_embed,
+            'seg_maps': seg_maps
+        }
+        sava_numpy(save_path, curr)
